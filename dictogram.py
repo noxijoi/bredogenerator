@@ -1,9 +1,8 @@
 import random
 
+
 class Dictogram(dict):
     def __init__(self, iterable=None):
-        # Инициализируем наше распределение как новый объект класса,
-        # добавляем имеющиеся элементы
         super(Dictogram, self).__init__()
         self.types = 0  # число уникальных ключей в распределении
         self.tokens = 0  # общее количество всех слов в распределении
@@ -30,8 +29,6 @@ class Dictogram(dict):
 
     def return_random_word(self):
         random_key = random.sample(self, 1)
-        # Другой способ:
-        # random.choice(histogram.keys())
         return random_key[0]
 
     def return_weighted_random_word(self):
@@ -40,4 +37,3 @@ class Dictogram(dict):
         keys = list(self.keys())
         values = list(self.values())
         return random.choices(keys, weights=values)[0]
-

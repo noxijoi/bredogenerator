@@ -8,11 +8,19 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Updater, CallbackQueryHandler, ConversationHandler, MessageHandler, Filters
 from telegram.ext import CommandHandler
 
+import gpt_2_simple as gpt2
+
 from dictogram import Dictogram
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
                     level=logging.INFO)
 conf = configparser.RawConfigParser()
+
+news = {}
+category_models ={}
+
+sess = gpt2.start_tf_sess()
+run_name = 'news_s'
 
 END_OF_SENTENCE_CHARS = '.!?'
 PUNCTUATION_MARKS_CHARS = ',;:-—–'
@@ -21,8 +29,9 @@ END = '.'
 # режим генерации
 USER_ACTION_CHOOSE_CATEGORY = 'choose category'
 USER_ACTION_ENTER_TITLE = 'enter title'
+USER_ACTION_CHOOSE_GEN_TITLE ='gen title'
 
-ACTION_TYPES = (USER_ACTION_ENTER_TITLE, USER_ACTION_CHOOSE_CATEGORY)
+ACTION_TYPES = (USER_ACTION_ENTER_TITLE, USER_ACTION_CHOOSE_CATEGORY,USER_ACTION_CHOOSE_GEN_TITLE)
 ############################
 # категории новосте
 CATEGORIES = {'Игры': 'https://news.yandex.ru/games.rss',
@@ -43,7 +52,8 @@ def start(update, context):
 
     keyboard = [
         [InlineKeyboardButton("Выбрать категорию", callback_data=USER_ACTION_CHOOSE_CATEGORY)],
-        [InlineKeyboardButton("Придумать свой заголовок новости", callback_data=USER_ACTION_ENTER_TITLE)]
+        [InlineKeyboardButton("Придумать свой заголовок новости", callback_data=USER_ACTION_ENTER_TITLE)],
+        [InlineKeyboardButton("Получить рандомный заголовок", callback_data=USER_ACTION_CHOOSE_GEN_TITLE)],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     update.message.reply_text('Вы можете получить свою сгенерированную новость из заголовков реальных новостей или '
@@ -55,9 +65,9 @@ def start(update, context):
 def help(update, context):
     logging.info("receive help command from {}".format(update.message.from_user.id))
     context.bot.send_message(chat_id=update.effective_chat.id,
-                             text="/start to start"
-                                  "/help to help"
-                                  "/info to get dev info")
+                             text="/start to start \n"
+                                  "/help to help \n"
+                                  "/info to get dev info \n")
 
 
 def info(update, context):
@@ -84,9 +94,21 @@ def resolve_user_choose_category(update, context):
     )
     return CHOOSE_CATEGORY
 
+def gen_random_title(update, context):
+    category = 'Главное'
+    query = update.callback_query
+    query.answer()
+    generated_title = generate_markov_title_for_category(category)
+    query.edit_message_text(
+        text=generated_title
+    )
+    return ENTER_TITLE_CREATION_OPTION
 
 def resolve_user_title(update, context):
     title = update.message.text
+    generated_text = generate_text(title)
+    msg_text = title + '\n\n' + generated_text
+    update.message.reply_text(text=msg_text)
     return ENTER_TITLE_CREATION_OPTION
 
 
@@ -94,27 +116,29 @@ def resolve_category(update, context):
     query = update.callback_query
     query.answer()
     category = query.data
-    logging.info("user want generate news for " + category + "category")
-    titles = get_titles_for_category(category)
-    generatedTitle = generate_markov_title(titles)
-    query.edit_message_text(text=generatedTitle)
+    logging.info("user wants generate news for " + category + "category")
+    generated_title = generate_markov_title_for_category(category)
+    generated_text = generate_text(generated_title)
+    msg_text = generated_title + '\n\n' + generated_text
+    query.edit_message_text(text=msg_text)
     return ENTER_TITLE_CREATION_OPTION
 
 
-# TODO загрузка новостей по загрузке бота
-def get_titles_for_category(category):
-    newsFeed = feedparser.parse(CATEGORIES[category])
-    titles = []
-    for entry in newsFeed.entries:
-        titles.append(entry.title)
-    return titles
+def load_news():
+    global news
+    for category in CATEGORIES:
+        newsFeed = feedparser.parse(CATEGORIES[category])
+        category_news = []
+        for entry in newsFeed.entries:
+            category_news.append(entry.description)
+        news[category] = category_news
 
 
-def generate_markov_title(titles):
+def parse_words(text_arr):
     words = []
-    for title in titles:
+    words.append(END)
+    for title in text_arr:
         title_words = title.split(' ')
-        words.append(END)
         for word in title_words:
             word = word.strip(PUNCTUATION_MARKS_CHARS)
             if word.endswith('.') or word.endswith('?') or word.endswith('!'):
@@ -123,7 +147,19 @@ def generate_markov_title(titles):
                 words.append(END)
             else:
                 words.append(word)
+    return words
 
+
+def generate_markov_title_for_category(category):
+    markov_model = category_models[category]
+    markov_title = generate_random_sentence(20, markov_model)
+    dot = markov_title.rfind(".")
+    markov_title = markov_title[:dot]
+    return markov_title
+
+
+def generate_markov_title(titles):
+    words = parse_words(titles)
     markov_model = make_markov_model(words)
     sentence = generate_random_sentence(10, markov_model)
     return sentence
@@ -145,12 +181,11 @@ def make_markov_model(data):
 
 
 def generate_random_start(model):
-    # Чтобы сгенерировать "правильное" начальное слово, используйте код ниже:
     # Правильные начальные слова - это те, что являлись началом предложений в корпусе
     start_windows = []
     for win in model:
         if win[0] is END:
-            win = shiftWindow(win, model[win].return_weighted_random_word())
+            win = shift_window(win, model[win].return_weighted_random_word())
             start_windows.append(win)
     return random.choice(start_windows)
 
@@ -161,24 +196,53 @@ def generate_random_sentence(length, markov_model):
     for i in range(0, length):
         current_dictogram = markov_model[current_win]
         random_weighted_word = current_dictogram.return_weighted_random_word()
-        current_win = shiftWindow(current_win, random_weighted_word)
+        current_win = shift_window(current_win, random_weighted_word)
         sentence.append(random_weighted_word)
     sentence[0] = sentence[0].capitalize()
     return ' '.join(sentence) + END
 
 
-def shiftWindow(window, nextWord):
+def shift_window(window, next_word):
     list_win = list(window)
     list_win = list_win[1:]
-    list_win.append(nextWord)
-    tutuple = ('Захарова',)
+    list_win.append(next_word)
     current_win = tuple(list_win)
     return current_win
 
 
+def load_gpt():
+    global run_name, sess
+    run_name = conf['gpt2']['run_name']
+    sess = gpt2.start_tf_sess()
+    gpt2.load_gpt2(sess, run_name=run_name)
+
+
+def generate_text(title):
+    gpt2.tf.reset_default_graph()
+    run_name = conf['gpt2']['run_name']
+    sess = gpt2.start_tf_sess()
+    gpt2.load_gpt2(sess, run_name=run_name)
+    generated_text = gpt2.generate(sess,
+                          run_name=run_name,
+                          prefix=title,
+                          length=300,
+                          include_prefix=False,
+                          return_as_list=True)[0]
+    dot = generated_text.rfind('.');
+    return generated_text[:dot]
+
+
+def generate_markov_models():
+    for news_category in news:
+        words = parse_words(news[news_category])
+        category_markov_model = make_markov_model(words)
+        category_models[news_category] = category_markov_model
+
+
 def main():
     conf.read("config.ini")
-
+    load_news()
+    generate_markov_models()
     token = conf['telegram']['token']
     updater = Updater(token=token, use_context=True)
     dispatcher = updater.dispatcher
@@ -192,7 +256,10 @@ def main():
             ENTER_TITLE_CREATION_OPTION: [CallbackQueryHandler(resolve_user_choose_category,
                                                                pattern=USER_ACTION_CHOOSE_CATEGORY),
                                           CallbackQueryHandler(resolve_user_enter_title,
-                                                               pattern=USER_ACTION_ENTER_TITLE)],
+                                                               pattern=USER_ACTION_ENTER_TITLE),
+                                          CallbackQueryHandler(gen_random_title,
+                                                               pattern=USER_ACTION_CHOOSE_GEN_TITLE)
+                                          ],
             CHOOSE_CATEGORY: [CallbackQueryHandler(resolve_category)],
             USER_ENTER_TITLE: [MessageHandler(Filters.text, callback=resolve_user_title)]
         },
@@ -204,5 +271,4 @@ def main():
 
 
 if __name__ == '__main__':
-
     main()
